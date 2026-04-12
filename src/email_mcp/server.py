@@ -8,11 +8,16 @@ from mcp.server import Server
 import mcp.server.stdio
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Mount
 from starlette.types import Scope, Receive, Send
 import uvicorn
 
-from gmail.gmail_service import GmailService
+from email.services.service import Service
+from email.services.provider_detection import detect_provider
+from email.services.gmail_service import GmailService
+from email.services.microsoft_service import MicrosoftService
+
+from email.routes.discovery import dicovery_routes
 
 
 # Configure logging
@@ -21,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 EMAIL_ADMIN_PROMPTS = """You are an email administrator.
 You can draft, edit, read, trash, open, and send emails.
-You've been given access to a specific gmail account.
+You've been given access to a specific email account.
 You have the following tools available:
 - Send an email (send-email)
 - Retrieve unread emails (get-unread-emails)
@@ -79,8 +84,8 @@ PROMPTS = {
 }
 
 
-def create_server(gmail_service: GmailService) -> Server:
-    server = Server("gmail")
+def create_server() -> Server:
+    server = Server("email-mcp")
 
     @server.list_prompts()
     async def list_prompts() -> list[types.Prompt]:
@@ -270,7 +275,7 @@ def create_server(gmail_service: GmailService) -> Server:
             else:
                 message_content = message
 
-            send_response = await gmail_service.send_email(recipient, subject, message_content)
+            send_response = await service.send_email(recipient, subject, message_content)
 
             if send_response["status"] == "success":
                 response_text = f"Email sent successfully. Message ID: {send_response['message_id']}"
@@ -280,7 +285,7 @@ def create_server(gmail_service: GmailService) -> Server:
 
         if name == "get-unread-emails":
 
-            unread_emails = await gmail_service.get_unread_emails()
+            unread_emails = await service.get_unread_emails()
             return [types.TextContent(type="text", text=str(unread_emails),artifact={"type": "json", "data": unread_emails} )]
 
         if name == "read-email":
@@ -288,28 +293,28 @@ def create_server(gmail_service: GmailService) -> Server:
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
-            retrieved_email = await gmail_service.read_email(email_id)
+            retrieved_email = await service.read_email(email_id)
             return [types.TextContent(type="text", text=str(retrieved_email),artifact={"type": "dictionary", "data": retrieved_email} )]
         if name == "open-email":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
-            msg = await gmail_service.open_email(email_id)
+            msg = await service.open_email(email_id)
             return [types.TextContent(type="text", text=str(msg))]
         if name == "trash-email":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
-            msg = await gmail_service.trash_email(email_id)
+            msg = await service.trash_email(email_id)
             return [types.TextContent(type="text", text=str(msg))]
         if name == "mark-email-as-read":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
-            msg = await gmail_service.mark_email_as_read(email_id)
+            msg = await service.mark_email_as_read(email_id)
             return [types.TextContent(type="text", text=str(msg))]
         else:
             logger.error(f"Unknown tool: {name}")
@@ -319,56 +324,37 @@ def create_server(gmail_service: GmailService) -> Server:
 
 
 async def main(
-    creds_file_path: str,
-    token_path: str,
-    transport: str = "stdio",
     host: str = "localhost",
     port: int = 8000,
 ):
-    gmail_service = GmailService(creds_file_path, token_path)
-    server = create_server(gmail_service)
 
-    if transport == "stdio":
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
-    elif transport == "http":
-        session_manager = StreamableHTTPSessionManager(app=server)
+    server = create_server()
+    session_manager = StreamableHTTPSessionManager(app=server)
 
-        async def handle_streamable_http(scope: Scope, receive: Receive, send: Send):
-            await session_manager.handle_request(scope, receive, send)
+    async def handle_streamable_http(scope: Scope, receive: Receive, send: Send):
+        await session_manager.handle_request(scope, receive, send)
 
-        @asynccontextmanager
-        async def lifespan(app):
-            async with session_manager.run():
-                yield
+    @asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
 
-        starlette_app = Starlette(
-            routes=[Route("/mcp", endpoint=handle_streamable_http)],
-            lifespan=lifespan,
-        )
+    starlette_app = Starlette(
+        routes=[
+            Mount("/mcp", app=handle_streamable_http),
+            Mount('/.well-known', routes=dicovery_routes)
+        ],
+        lifespan=lifespan,
+    )
 
-        logger.info(f"Starting HTTP server on {host}:{port}")
-        config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
-        uv_server = uvicorn.Server(config)
-        await uv_server.serve()
+    logger.info(f"Starting HTTP server on {host}:{port}")
+    config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
+    uv_server = uvicorn.Server(config)
+    await uv_server.serve()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Gmail API MCP Server')
-    parser.add_argument('--creds-file-path',
-                        required=True,
-                       help='OAuth 2.0 credentials file path')
-    parser.add_argument('--token-path',
-                        required=True,
-                       help='File location to store and retrieve access and refresh tokens for application')
-    parser.add_argument('--transport',
-                        choices=['stdio', 'http'],
-                        default='stdio',
-                        help='Transport type (default: stdio)')
+    parser = argparse.ArgumentParser(description='Email MCP Server')
     parser.add_argument('--host',
                         default='localhost',
                         help='Host for HTTP transport (default: localhost)')
@@ -378,5 +364,7 @@ if __name__ == "__main__":
                         help='Port for HTTP transport (default: 8000)')
 
     args = parser.parse_args()
-    asyncio.run(main(args.creds_file_path, args.token_path,
-                     args.transport, args.host, args.port))
+    asyncio.run(main(
+        host=args.host,
+        port=args.port,
+    ))

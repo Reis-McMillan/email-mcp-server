@@ -1,19 +1,30 @@
 [project]
-name = "gmail"
+name = "email-mcp-server"
 version = "0.1.0"
-description = "Model Context Protocol server for gmail"
+description = "Model Context Protocol server for email (Gmail and Microsoft)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
     "mcp>=1.1.2",
     "google-api-python-client>=2.156.0",
-    "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.1",
+    "msgraph-sdk>=1.0.0",
+    "azure-core>=1.30.0",
+    "voluptuous>=0.16.0",
+    "pymongo>=4.16.0",
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
+    "pyjwt>=2.8.0",
+    "cryptography>=42.0.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/email_mcp"]
+
 [build-system]
-requires = [ "hatchling",]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-gmail = "gmail:main"
+email-mcp-server = "email_mcp:main"
