@@ -5,19 +5,22 @@ from contextlib import asynccontextmanager
 
 import mcp.types as types
 from mcp.server import Server
-import mcp.server.stdio
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
+from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.routing import Mount
 from starlette.types import Scope, Receive, Send
 import uvicorn
 
-from email.services.service import Service
-from email.services.provider_detection import detect_provider
-from email.services.gmail_service import GmailService
-from email.services.microsoft_service import MicrosoftService
+from email_mcp.db.auth_cache import AuthCache
+from email_mcp.db.authorization import Authorization
+from email_mcp.middleware.authentication import BearerToken
+from email_mcp.modules.services.service import Service
+import email_mcp.modules.services.gmail_service  # noqa: F401 – registers provider
+import email_mcp.modules.services.microsoft_service  # noqa: F401 – registers provider
 
-from email.routes.discovery import dicovery_routes
+from email_mcp.routes.auth import auth_routes
+from email_mcp.routes.discovery import dicovery_routes
 
 
 # Configure logging
@@ -82,6 +85,25 @@ PROMPTS = {
         ],
     ),
 }
+
+
+SERVICE_PROPERTY = {
+    "service": {
+        "type": "string",
+        "enum": ["google", "microsoft"],
+        "description": "Email service provider",
+    },
+}
+
+
+def _get_service(arguments: dict) -> Service:
+    provider = arguments.get("service")
+    if not provider:
+        raise ValueError("Missing required 'service' parameter")
+    ServiceClass = Service.for_provider(provider)
+    if ServiceClass is None:
+        raise ValueError(f"Unknown service provider: {provider}")
+    return ServiceClass()
 
 
 def create_server() -> Server:
@@ -167,6 +189,7 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        **SERVICE_PROPERTY,
                         "recipient_id": {
                             "type": "string",
                             "description": "Recipient email address",
@@ -180,7 +203,7 @@ def create_server() -> Server:
                             "description": "Email content text",
                         },
                     },
-                    "required": ["recipient_id", "subject", "message"],
+                    "required": ["service", "recipient_id", "subject", "message"],
                 },
             ),
             types.Tool(
@@ -190,12 +213,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        **SERVICE_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["email_id"],
+                    "required": ["service", "email_id"],
                 },
             ),
             types.Tool(
@@ -203,8 +227,10 @@ def create_server() -> Server:
                 description="Retrieve unread emails",
                 inputSchema={
                     "type": "object",
-                    "properties": {},
-                    "required": []
+                    "properties": {
+                        **SERVICE_PROPERTY,
+                    },
+                    "required": ["service"],
                 },
             ),
             types.Tool(
@@ -213,12 +239,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        **SERVICE_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["email_id"],
+                    "required": ["service", "email_id"],
                 },
             ),
             types.Tool(
@@ -227,12 +254,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        **SERVICE_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["email_id"],
+                    "required": ["service", "email_id"],
                 },
             ),
             types.Tool(
@@ -241,12 +269,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        **SERVICE_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["email_id"],
+                    "required": ["service", "email_id"],
                 },
             ),
         ]
@@ -255,6 +284,8 @@ def create_server() -> Server:
     async def handle_call_tool(
         name: str, arguments: dict | None
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+
+        service = _get_service(arguments)
 
         if name == "send-email":
             recipient = arguments.get("recipient_id")
@@ -283,39 +314,42 @@ def create_server() -> Server:
                 response_text = f"Failed to send email: {send_response['error_message']}"
             return [types.TextContent(type="text", text=response_text)]
 
-        if name == "get-unread-emails":
-
+        elif name == "get-unread-emails":
             unread_emails = await service.get_unread_emails()
-            return [types.TextContent(type="text", text=str(unread_emails),artifact={"type": "json", "data": unread_emails} )]
+            return [types.TextContent(type="text", text=str(unread_emails))]
 
-        if name == "read-email":
+        elif name == "read-email":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
             retrieved_email = await service.read_email(email_id)
-            return [types.TextContent(type="text", text=str(retrieved_email),artifact={"type": "dictionary", "data": retrieved_email} )]
-        if name == "open-email":
+            return [types.TextContent(type="text", text=str(retrieved_email))]
+
+        elif name == "open-email":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
             msg = await service.open_email(email_id)
             return [types.TextContent(type="text", text=str(msg))]
-        if name == "trash-email":
+
+        elif name == "trash-email":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
             msg = await service.trash_email(email_id)
             return [types.TextContent(type="text", text=str(msg))]
-        if name == "mark-email-as-read":
+
+        elif name == "mark-email-as-read":
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
             msg = await service.mark_email_as_read(email_id)
             return [types.TextContent(type="text", text=str(msg))]
+
         else:
             logger.error(f"Unknown tool: {name}")
             raise ValueError(f"Unknown tool: {name}")
@@ -324,7 +358,7 @@ def create_server() -> Server:
 
 
 async def main(
-    host: str = "localhost",
+    host: str = "0.0.0.0",
     port: int = 8000,
 ):
 
@@ -336,13 +370,30 @@ async def main(
 
     @asynccontextmanager
     async def lifespan(app):
+        auth_cache = AuthCache()
+        authorization = Authorization()
+        await auth_cache.ensure_indexes()
+        await authorization.ensure_indexes()
+
+        app.state.db = type('DB', (), {
+            'auth_cache': auth_cache,
+            'authorization': authorization,
+        })()
+
+        Service.set_auth_cache(auth_cache)
+
         async with session_manager.run():
             yield
 
+    authenticated_mcp = AuthenticationMiddleware(
+        handle_streamable_http, backend=BearerToken()
+    )
+
     starlette_app = Starlette(
         routes=[
-            Mount("/mcp", app=handle_streamable_http),
-            Mount('/.well-known', routes=dicovery_routes)
+            Mount("/auth", routes=auth_routes),
+            Mount("/mcp", app=authenticated_mcp),
+            Mount('/.well-known', routes=dicovery_routes),
         ],
         lifespan=lifespan,
     )

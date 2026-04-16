@@ -4,7 +4,7 @@ import jwt
 import secrets
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Router, Route
+from starlette.routing import Route
 from starlette.exceptions import HTTPException
 from urllib.parse import urlencode
 
@@ -132,7 +132,7 @@ async def callback(request: Request):
     )
 
 
-auth_router = Router(
-    Router("initialize", endpoint=initialize, methods=["GET"]),
-    Route("/callback", endpoint=callback, methods=["GET"])
-)
+auth_routes = [
+    Route("/initialize", endpoint=initialize, methods=["GET"]),
+    Route("/callback", endpoint=callback, methods=["GET"]),
+]
