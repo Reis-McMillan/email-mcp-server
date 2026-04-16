@@ -4,10 +4,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+ARG ENV=prod
+
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project
 
 COPY src/ src/
+RUN cp src/email_mcp/config/config.${ENV}.py src/email_mcp/config/config.py
 RUN uv sync --frozen
 
 EXPOSE 8000

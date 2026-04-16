@@ -3,7 +3,7 @@ import logging
 import httpx
 import jwt
 
-import email_mcp.config as config
+import email_mcp.config.config as config
 from email_mcp.db.auth_cache import AuthCache
 from email_mcp.utils.external_tokens import find_token
 

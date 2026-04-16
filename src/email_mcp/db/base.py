@@ -1,6 +1,6 @@
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 
-import email_mcp.config as config
+import email_mcp.config.config as config
 
 class Base:
     mongo_uri = config.MONGO_URI

@@ -3,7 +3,7 @@ from starlette.authentication import (
     AuthenticationBackend, AuthenticationError, SimpleUser, AuthCredentials
 )
 
-import email_mcp.config as config
+import email_mcp.config.config as config
 from email_mcp.utils.jwks import get_public_key
 
 

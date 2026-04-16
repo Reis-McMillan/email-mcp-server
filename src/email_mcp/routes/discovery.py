@@ -1,7 +1,7 @@
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from .. import config
+from ..config import config
 
 async def get_prm_doc(request):
     return JSONResponse({
