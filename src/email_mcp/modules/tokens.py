@@ -5,96 +5,111 @@ import jwt
 
 import email_mcp.config.config as config
 from email_mcp.db.auth_cache import AuthCache
-from email_mcp.utils.external_tokens import find_token
 
 logger = logging.getLogger(__name__)
 
 
-async def _ensure_fresh_access_token(
-    user_id: int,
-    auth_cache: AuthCache
-) -> dict:
-    auth = await auth_cache.get(user_id)
-    if not auth:
-        raise ValueError(f"No cached auth for user {user_id}")
-
-    try:
-        jwt.decode(
-            auth['access_token'],
-            options={"verify_signature": False, "verify_exp": True}
-        )
-    except jwt.ExpiredSignatureError:
-        logger.info("Access token expired for %s, refreshing", auth['email'])
-        auth = await refresh_access_token(user_id, auth_cache)
-
-    return auth
-
-
-async def refresh_access_token(
-    user_id: int,
-    auth_cache: AuthCache
-) -> dict:
-    auth = await auth_cache.get(user_id)
-    if not auth:
-        raise ValueError(f"No cached auth for user {user_id}")
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f'{config.AUTH_URL}/token',
-            data={
-                "grant_type": "refresh_token",
-                "client_id": config.CLIENT_ID,
-                "client_secret": config.CLIENT_SECRET,
-                "refresh_token": auth['refresh_token']
-            }
-        )
-
-    if not response.is_success:
-        raise RuntimeError(f"Token refresh failed: {response.status_code} {response.text}")
-
-    data = response.json()
-    auth['access_token'] = data['access_token']
-    auth['refresh_token'] = data['refresh_token']
-
-    await auth_cache.upsert(auth)
-    return auth
-
-
-async def get_external_token(
-    user_id: int,
-    auth_cache: AuthCache,
-    provider_id: str,
-    subject: str
-) -> dict:
-    auth = await _ensure_fresh_access_token(user_id, auth_cache)
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{config.AUTH_URL}/federation/tokens",
-            headers={
-                "Authorization": f"Bearer {auth['access_token']}"
-            },
-            params={
-                "provider_id": provider_id,
-                "subject": subject
-            }
-        )
-
-    if not response.is_success:
-        raise RuntimeError(f"External token fetch failed: {response.status_code} {response.text}")
-
-    data = response.json()
+class VerysClient:
+    def __init__(self, auth_cache: AuthCache):
+        self.auth_cache: AuthCache = auth_cache
+        self.token_url = f"{config.AUTH_URL}/token"
+        self.federation_url = f"{config.AUTH_URL}/federation/"
     
-    data['subject'] = subject
-
-    if auth.get('external_tokens') is None:
-        auth['external_tokens'] = []
-
-    existing = find_token(auth['external_tokens'], provider_id, subject)
-    if existing:
-        existing.update(data)
-    else:
-        auth['external_tokens'].append(data)
+    def token_expired(self, token: str | bytes) -> bool:
+        try:
+            jwt.decode(
+                token,
+                options={"verify_signature": False, "verify_exp": True}
+            )
+            return False
+        except jwt.ExpiredSignatureError:
+            return True
     
-    await auth_cache.upsert(auth)
-    return data
+    async def refresh_access_token(
+        self,
+        auth: dict
+    ) -> dict:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": config.CLIENT_ID,
+                    "client_secret": config.CLIENT_SECRET,
+                    "refresh_token": auth['refresh_token']
+                }
+            )
+
+        if not response.is_success:
+            raise RuntimeError(f"Token refresh failed: {response.status_code} {response.text}")
+
+        data = response.json()
+        auth['access_token'] = data['access_token']
+        auth['refresh_token'] = data['refresh_token']
+
+        await self.auth_cache.upsert(auth)
+
+        return auth
+    
+    async def check_token(
+        self,
+        auth: dict
+    ) -> dict:
+        if self.token_expired(auth['access_token']):
+            logger.info("Access token expired for %s, refreshing", auth['email'])
+            auth = await self.refresh_access_token(auth)
+
+        return auth
+    
+    @staticmethod
+    def _insert_external_tokens(
+        auth: dict,
+        ext_token: dict | list[dict]
+    ):
+        # if ext_tokens is list, overwrite
+        if isinstance(ext_token, list):
+            auth['external_tokens'] = ext_token
+            return auth
+        
+        elif isinstance(ext_token, dict):
+            if auth['external_tokens'] is None:
+                auth['external_tokens'] = [ext_token]
+                return auth
+            token_ids: list = list(map(lambda t: t['token_id'], auth['external_tokens']))
+            try:
+                idx = token_ids.index(ext_token['token_id'])
+                auth['external_tokens'][idx] = ext_token
+            except ValueError:
+                auth['external_tokens'].append(ext_token)
+            
+            return auth
+        
+        
+
+    async def get_external_tokens(
+        self,
+        auth: dict,
+        token_id: int | None = None
+    ) -> dict:
+        auth = await self.check_token(auth)
+
+        async with httpx.AsyncClient() as client:
+            if token_id:
+                federation_url = f"{self.federation_url}{token_id}"
+            else:
+                federation_url = f"{self.federation_url}tokens"
+            response = await client.get(
+                federation_url,
+                headers={
+                    "Authorization": f"Bearer {auth['access_token']}"
+                },
+            )
+
+        if not response.is_success:
+            raise RuntimeError(f"External token fetch failed: {response.status_code} {response.text}")
+
+        data: list[dict] | dict = response.json()
+        auth = self._insert_external_tokens(auth, data)
+        await self.auth_cache.upsert(auth)
+
+        return auth

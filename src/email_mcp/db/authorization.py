@@ -1,5 +1,5 @@
 from .base import Base
-from voluptuous import Schema, Required
+from voluptuous import Schema, Required, Any
 
 
 class Authorization(Base):
@@ -10,7 +10,8 @@ class Authorization(Base):
 
         self.schema = Schema({
             Required('state'): str,
-            Required('nonce'): str
+            Required('nonce'): str,
+            Required('return_url'): Any(str, None)
         })
 
     async def ensure_indexes(self):
@@ -18,4 +19,8 @@ class Authorization(Base):
 
     async def get(self, state: str) -> dict | None:
         return await self.collection.find_one({'state': state}, {'_id': 0})
+
+    async def delete(self, state: str) -> int:
+        result = await self.collection.delete_one({'state': state})
+        return result.deleted_count
 

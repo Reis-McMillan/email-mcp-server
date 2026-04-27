@@ -31,16 +31,13 @@ def decode_mime_header(header: str) -> str:
 
 class GmailService(Service):
     provider_id = "google"
-
-    async def _get_service(self):
-        token_data = await self.get_token()
-        creds = Credentials(token=token_data['access_token'])
-        self._service = build('gmail', 'v1', credentials=creds)
-        return self._service
+    _service = None
 
     async def _ensure_service(self):
         if self._service is None:
-            await self._get_service()
+            token_data = await self.get_token()
+            creds = Credentials(token=token_data['access_token'])
+            self._service = build('gmail', 'v1', credentials=creds)
         return self._service
 
     async def send_email(self, recipient_id: str, subject: str, message: str) -> dict:

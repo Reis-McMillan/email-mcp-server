@@ -2,13 +2,13 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
 from email_mcp.db.auth_cache import AuthCache
-from email_mcp.modules.tokens import get_external_token
-from email_mcp.utils.external_tokens import find_token
+from email_mcp.modules.tokens import VerysClient
 
 
 class Service(ABC):
     provider_id: str
     auth_cache: AuthCache
+    verys_client: VerysClient
     _registry: dict[str, type['Service']] = {}
 
     def __init_subclass__(cls, **kwargs):
@@ -28,29 +28,45 @@ class Service(ABC):
     def set_auth_cache(cls, auth_cache: AuthCache):
         cls.auth_cache = auth_cache
 
-    async def get_token(self) -> str:
+    @classmethod
+    def set_verys_client(cls, client: VerysClient):
+        cls.verys_client = client
+
+    async def get_token(self) -> dict:
         auth = await self.auth_cache.get(self.user_id)
         if not auth:
             raise ValueError(f"No cached auth for user {self.user_id}")
 
-        token = find_token(
-            auth.get('external_tokens') or [],
-            self.provider_id, self.subject
-        )
+        token = self._find_local_token(auth.get('external_tokens') or [])
+        if token and not self._token_expired(token):
+            return token
 
-        if token:
-            expires_at = token.get('expires_at')
-            if expires_at:
-                exp_dt = datetime.fromisoformat(expires_at)
-                if exp_dt > datetime.now(timezone.utc):
-                    return token['access_token']
-            else:
-                return token['access_token']
-
-        refreshed = await get_external_token(
-            self.user_id, self.auth_cache, self.provider_id, self.subject
+        auth = await self.verys_client.get_external_tokens(
+            auth,
+            token_id=token['token_id'] if token else None,
         )
-        return refreshed['access_token']
+        token = self._find_local_token(auth.get('external_tokens') or [])
+        if not token:
+            raise ValueError(
+                f"No token for provider={self.provider_id} subject={self.subject}"
+            )
+        return token
+
+    def _find_local_token(self, tokens: list[dict]) -> dict | None:
+        for t in tokens:
+            if (t.get('provider_id') == self.provider_id
+                    and t.get('subject') == self.subject):
+                return t
+        return None
+
+    @staticmethod
+    def _token_expired(token: dict) -> bool:
+        exp = token.get('expires_at')
+        if not exp:
+            return False
+        if isinstance(exp, str):
+            exp = datetime.fromisoformat(exp)
+        return exp <= datetime.now(timezone.utc)
 
     @abstractmethod
     async def send_email(self, recipient_id: str, subject: str, message: str) -> dict:

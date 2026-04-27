@@ -15,4 +15,4 @@ RUN uv sync --frozen
 
 EXPOSE 8000
 
-CMD ["uv", "run", "email-mcp-server", "--host", "0.0.0.0"]
+CMD ["uv", "run", "uvicorn", "email_mcp.main:app", "--host", "0.0.0.0", "--port", "8000"]

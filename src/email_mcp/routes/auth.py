@@ -4,11 +4,11 @@ import jwt
 import secrets
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Route
 from starlette.exceptions import HTTPException
 from urllib.parse import urlencode
 
 import email_mcp.config.config as config
+from email_mcp.modules.tokens import VerysClient
 from email_mcp.utils.jwks import get_public_key
 
 
@@ -35,7 +35,8 @@ async def initialize(request: Request):
 
     await request.app.state.db.authorization.upsert({
         'state': state,
-        'nonce': nonce
+        'nonce': nonce,
+        'return_url': request.query_params.get('return_url')
     })
 
     return RedirectResponse(
@@ -90,49 +91,29 @@ async def callback(request: Request):
     if decoded.get('nonce') != authorization['nonce']:
         raise HTTPException(status_code=400, detail='Nonce missing or nonce mismatch.')
 
-    external_tokens = decoded.get('tokens', [])
-    if external_tokens:
-        for t in external_tokens:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f'{config.AUTH_URL}/federation/tokens',
-                    headers={
-                        'Authorizatoin': f'Bearer {decoded['access_token']}'
-                    },
-                    params={
-                        'provider_id': t['provider_id'],
-                        'subject': t['subject']
-                    }
-                )
-            
-            if response.status_code != 200:
-                # to-do: add logging that request failed
-                pass
-
-            result = await response.json()
-            t['access_token'] = result['access_token']
-            t['token_type'] = result['token_type']
-            t['expires_at'] = result['expires_at']
-
-    await request.app.state.db.auth_cache.upsert({
-        'user_id': decoded['sub'],
+    verys_client : VerysClient = request.app.state.verys_client
+    auth = {
+        'user_id': int(decoded['sub']),
         'email': decoded['email'],
-        'roles': decoded.get('roles', []),
+        'roles': decoded['roles'],
         'access_token': tokens['access_token'],
         'refresh_token': tokens['refresh_token'],
-        'mcp_token': None,
-        'external_tokens': external_tokens,
-        'expires_at': datetime.fromtimestamp(decoded['auth_time'], tz=timezone.utc) + timedelta(days=60) #might change to read form expires field
-    })
+        'expires_at': (
+            datetime.fromtimestamp(
+                decoded['auth_time'], tz=timezone.utc
+            ) + timedelta(days=60)),
+        'external_tokens': None
+    }
+    auth = await verys_client.get_external_tokens(auth)
+
+    if authorization['return_url']:
+        return RedirectResponse(
+            authorization['return_url'],
+            status_code=302
+        )
 
     return JSONResponse(
         content={
             'message': 'Successfully exchanged code for tokens.'
         }
     )
-
-
-auth_routes = [
-    Route("/initialize", endpoint=initialize, methods=["GET"]),
-    Route("/callback", endpoint=callback, methods=["GET"]),
-]

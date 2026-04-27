@@ -2,27 +2,41 @@ import jwt
 from starlette.authentication import (
     AuthenticationBackend, AuthenticationError, SimpleUser, AuthCredentials
 )
+from starlette.responses import JSONResponse, PlainTextResponse
 
 import email_mcp.config.config as config
+from email_mcp.db.auth_cache import AuthCache
 from email_mcp.utils.jwks import get_public_key
 
 
 class User(SimpleUser):
     def __init__(self, auth: dict):
-        super().__init__(auth['email'])
+        super().__init__(str(auth['user_id']))
         self.user_id = auth['user_id']
         self.access_token = auth['access_token']
         self.refresh_token = auth['refresh_token']
         self.external_tokens = auth.get('external_tokens')
+        self.auth = auth
+
+
+class AuthCacheMissing(AuthenticationError):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
+PUBLIC_PATHS = {
+    '/auth/initialize',
+    '/auth/callback',
+    '/.well-known/oauth-protected-resource'
+}
 
 
 class BearerToken(AuthenticationBackend):
     async def authenticate(self, conn):
-        if "Authorization" not in conn.headers:
-            return
-
         auth = conn.headers.get("Authorization")
         if not auth:
+            if conn.url.path in PUBLIC_PATHS:
+                return
             raise AuthenticationError('Missing auth token.')
 
         try:
@@ -39,8 +53,21 @@ class BearerToken(AuthenticationBackend):
             raise AuthenticationError('Invalid auth token.')
 
         user_id = int(decoded['sub'])
-        auth_cache = conn.app.state.db.auth_cache
-        cached_auth = await auth_cache.get(user_id)
-        if not cached_auth:
-            raise AuthenticationError('User session not found.')
-        return AuthCredentials(["authenticated"]), User(cached_auth)
+        auth_cache: AuthCache = conn.app.state.db.auth_cache
+        auth = await auth_cache.get(user_id)
+        if not auth:
+            raise AuthCacheMissing('User session not found.')
+        
+        return AuthCredentials(["authenticated"]), User(auth)
+
+
+def on_authenticated_error(request, exc):
+    if isinstance(exc, AuthCacheMissing):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "setup_required": True,
+                "redirect_url": config.INIT_URI
+            }
+        )
+    return PlainTextResponse(str(exc), status_code=400)

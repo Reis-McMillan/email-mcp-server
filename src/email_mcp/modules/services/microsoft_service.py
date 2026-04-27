@@ -12,7 +12,6 @@ from msgraph.generated.models.body_type import BodyType
 from msgraph.generated.models.recipient import Recipient
 from msgraph.generated.models.email_address import EmailAddress
 
-from email_mcp.db.auth_cache import AuthCache
 from email_mcp.modules.services.service import Service
 
 
@@ -36,15 +35,16 @@ class _ExternalTokenCredential(AsyncTokenCredential):
 
 class MicrosoftService(Service):
     provider_id = "microsoft"
+    _client: GraphServiceClient | None = None
 
-    def __init__(self, username: str, auth_cache: AuthCache):
-        super().__init__(username, auth_cache)
-        credential = _ExternalTokenCredential(self)
-        self.client = GraphServiceClient(
-            credentials=credential,
-            scopes=["https://graph.microsoft.com/.default"],
-        )
-        logger.info("Microsoft Graph client initialized")
+    @property
+    def client(self) -> GraphServiceClient:
+        if self._client is None:
+            self._client = GraphServiceClient(
+                credentials=_ExternalTokenCredential(self),
+                scopes=["https://graph.microsoft.com/.default"],
+            )
+        return self._client
 
     async def send_email(self, recipient_id: str, subject: str, message: str) -> dict:
         """Creates and sends an email message via Microsoft Graph."""

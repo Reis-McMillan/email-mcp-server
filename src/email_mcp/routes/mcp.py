@@ -1,30 +1,15 @@
-import argparse
-import asyncio
-import logging
-from contextlib import asynccontextmanager
-
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from starlette.applications import Starlette
-from starlette.middleware.authentication import AuthenticationMiddleware
-from starlette.routing import Mount
 from starlette.types import Scope, Receive, Send
-import uvicorn
+import logging
 
-from email_mcp.db.auth_cache import AuthCache
-from email_mcp.db.authorization import Authorization
-from email_mcp.middleware.authentication import BearerToken
+
+from email_mcp.modules.services.context import current_user
 from email_mcp.modules.services.service import Service
 import email_mcp.modules.services.gmail_service  # noqa: F401 – registers provider
 import email_mcp.modules.services.microsoft_service  # noqa: F401 – registers provider
 
-from email_mcp.routes.auth import auth_routes
-from email_mcp.routes.discovery import dicovery_routes
-
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EMAIL_ADMIN_PROMPTS = """You are an email administrator.
@@ -87,23 +72,42 @@ PROMPTS = {
 }
 
 
-SERVICE_PROPERTY = {
-    "service": {
+ACCOUNT_PROPERTY = {
+    "account": {
         "type": "string",
-        "enum": ["google", "microsoft"],
-        "description": "Email service provider",
+        "description": (
+            "Subject identifier of the connected account to scope this call to. "
+            "Use the `account` value returned by a prior tool result."
+        ),
     },
 }
 
 
-def _get_service(arguments: dict) -> Service:
-    provider = arguments.get("service")
-    if not provider:
-        raise ValueError("Missing required 'service' parameter")
-    ServiceClass = Service.for_provider(provider)
-    if ServiceClass is None:
-        raise ValueError(f"Unknown service provider: {provider}")
-    return ServiceClass()
+def _resolve_services(account: str | None, *, required: bool) -> list[tuple[Service, dict]]:
+    """Resolve (service, external_token) pairs for the current authenticated user.
+
+    - account given: exactly one matching (service, token) or ValueError.
+    - account None and required: ValueError.
+    - account None and not required: fan out across all connected tokens.
+    """
+    user = current_user.get()
+    tokens = user.external_tokens or []
+
+    if account is not None:
+        tokens = [t for t in tokens if t.get("subject") == account]
+        if not tokens:
+            raise ValueError(f"No connected account for subject {account!r}")
+    elif required:
+        raise ValueError("Missing required 'account' parameter")
+
+    resolved: list[tuple[Service, dict]] = []
+    for tok in tokens:
+        cls = Service.for_provider(tok.get("provider_id"))
+        if cls is None:
+            logger.warning("Skipping token with unknown provider_id: %r", tok.get("provider_id"))
+            continue
+        resolved.append((cls(user_id=user.user_id, subject=tok["subject"]), tok))
+    return resolved
 
 
 def create_server() -> Server:
@@ -138,7 +142,6 @@ def create_server() -> Server:
             recipient = arguments.get("recipient", "")
             recipient_email = arguments.get("recipient_email", "")
 
-            # First message asks the LLM to create the draft
             return types.GetPromptResult(
                 messages=[
                     types.PromptMessage(
@@ -157,7 +160,6 @@ def create_server() -> Server:
             changes = arguments.get("changes", "")
             current_draft = arguments.get("current_draft", "")
 
-            # Edit existing draft based on requested changes
             return types.GetPromptResult(
                 messages=[
                     types.PromptMessage(
@@ -183,13 +185,13 @@ def create_server() -> Server:
         return [
             types.Tool(
                 name="send-email",
-                description="""Sends email to recipient.
+                description="""Sends email to recipient from the specified account.
                 Do not use if user only asked to draft email.
                 Drafts must be approved before sending.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                         "recipient_id": {
                             "type": "string",
                             "description": "Recipient email address",
@@ -203,79 +205,81 @@ def create_server() -> Server:
                             "description": "Email content text",
                         },
                     },
-                    "required": ["service", "recipient_id", "subject", "message"],
+                    "required": ["account", "recipient_id", "subject", "message"],
                 },
             ),
             types.Tool(
                 name="trash-email",
-                description="""Moves email to trash.
-                Confirm before moving email to trash.""",
+                description="""Moves email to trash. Confirm before moving email to trash.""",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["service", "email_id"],
+                    "required": ["account", "email_id"],
                 },
             ),
             types.Tool(
                 name="get-unread-emails",
-                description="Retrieve unread emails",
+                description=(
+                    "Retrieve unread emails. If `account` is omitted, fans out across "
+                    "all of the user's connected email accounts."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                     },
-                    "required": ["service"],
+                    "required": [],
                 },
             ),
             types.Tool(
                 name="read-email",
-                description="Retrieves given email content",
+                description="Retrieves given email content from the specified account.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["service", "email_id"],
+                    "required": ["account", "email_id"],
                 },
             ),
             types.Tool(
                 name="mark-email-as-read",
-                description="Marks given email as read",
+                description="Marks given email as read on the specified account.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["service", "email_id"],
+                    "required": ["account", "email_id"],
                 },
             ),
             types.Tool(
                 name="open-email",
-                description="Open email in browser",
+                description="Open email in browser from the specified account.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **SERVICE_PROPERTY,
+                        **ACCOUNT_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["service", "email_id"],
+                    "required": ["account", "email_id"],
                 },
             ),
         ]
@@ -284,8 +288,8 @@ def create_server() -> Server:
     async def handle_call_tool(
         name: str, arguments: dict | None
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-
-        service = _get_service(arguments)
+        arguments = arguments or {}
+        account = arguments.get("account")
 
         if name == "send-email":
             recipient = arguments.get("recipient_id")
@@ -298,7 +302,6 @@ def create_server() -> Server:
             if not message:
                 raise ValueError("Missing message parameter")
 
-            # Extract subject and message content
             email_lines = message.split('\n')
             if email_lines[0].startswith('Subject:'):
                 subject = email_lines[0][8:].strip()
@@ -306,7 +309,8 @@ def create_server() -> Server:
             else:
                 message_content = message
 
-            send_response = await service.send_email(recipient, subject, message_content)
+            (svc, _), = _resolve_services(account, required=True)
+            send_response = await svc.send_email(recipient, subject, message_content)
 
             if send_response["status"] == "success":
                 response_text = f"Email sent successfully. Message ID: {send_response['message_id']}"
@@ -315,40 +319,41 @@ def create_server() -> Server:
             return [types.TextContent(type="text", text=response_text)]
 
         elif name == "get-unread-emails":
-            unread_emails = await service.get_unread_emails()
-            return [types.TextContent(type="text", text=str(unread_emails))]
+            services = _resolve_services(account, required=False)
+            aggregated: list[dict] = []
+            for svc, tok in services:
+                try:
+                    msgs = await svc.get_unread_emails()
+                except Exception as e:
+                    logger.warning("get_unread_emails failed for %s: %s", tok.get("subject"), e)
+                    continue
+                if not isinstance(msgs, list):
+                    logger.warning("get_unread_emails returned non-list for %s: %s", tok.get("subject"), msgs)
+                    continue
+                for m in msgs:
+                    aggregated.append({
+                        **m,
+                        "account": tok.get("subject"),
+                        "provider_id": tok.get("provider_id"),
+                    })
+            return [types.TextContent(type="text", text=str(aggregated))]
 
-        elif name == "read-email":
+        elif name in ("read-email", "trash-email", "mark-email-as-read", "open-email"):
             email_id = arguments.get("email_id")
             if not email_id:
                 raise ValueError("Missing email ID parameter")
 
-            retrieved_email = await service.read_email(email_id)
-            return [types.TextContent(type="text", text=str(retrieved_email))]
+            (svc, _), = _resolve_services(account, required=True)
 
-        elif name == "open-email":
-            email_id = arguments.get("email_id")
-            if not email_id:
-                raise ValueError("Missing email ID parameter")
-
-            msg = await service.open_email(email_id)
-            return [types.TextContent(type="text", text=str(msg))]
-
-        elif name == "trash-email":
-            email_id = arguments.get("email_id")
-            if not email_id:
-                raise ValueError("Missing email ID parameter")
-
-            msg = await service.trash_email(email_id)
-            return [types.TextContent(type="text", text=str(msg))]
-
-        elif name == "mark-email-as-read":
-            email_id = arguments.get("email_id")
-            if not email_id:
-                raise ValueError("Missing email ID parameter")
-
-            msg = await service.mark_email_as_read(email_id)
-            return [types.TextContent(type="text", text=str(msg))]
+            if name == "read-email":
+                result = await svc.read_email(email_id)
+            elif name == "trash-email":
+                result = await svc.trash_email(email_id)
+            elif name == "mark-email-as-read":
+                result = await svc.mark_email_as_read(email_id)
+            else:  # open-email
+                result = await svc.open_email(email_id)
+            return [types.TextContent(type="text", text=str(result))]
 
         else:
             logger.error(f"Unknown tool: {name}")
@@ -357,65 +362,15 @@ def create_server() -> Server:
     return server
 
 
-async def main(
-    host: str = "0.0.0.0",
-    port: int = 8000,
-):
+async def handle_streamable_http(scope: Scope, receive: Receive, send: Send):
+    app = scope.get("app")
+    if not app:
+        raise RuntimeError("ASGI Scope does not contain the app instance.")
 
-    server = create_server()
-    session_manager = StreamableHTTPSessionManager(app=server)
+    session_manager: StreamableHTTPSessionManager = app.state.session_manager
 
-    async def handle_streamable_http(scope: Scope, receive: Receive, send: Send):
+    token = current_user.set(scope["user"])
+    try:
         await session_manager.handle_request(scope, receive, send)
-
-    @asynccontextmanager
-    async def lifespan(app):
-        auth_cache = AuthCache()
-        authorization = Authorization()
-        await auth_cache.ensure_indexes()
-        await authorization.ensure_indexes()
-
-        app.state.db = type('DB', (), {
-            'auth_cache': auth_cache,
-            'authorization': authorization,
-        })()
-
-        Service.set_auth_cache(auth_cache)
-
-        async with session_manager.run():
-            yield
-
-    authenticated_mcp = AuthenticationMiddleware(
-        handle_streamable_http, backend=BearerToken()
-    )
-
-    starlette_app = Starlette(
-        routes=[
-            Mount("/auth", routes=auth_routes),
-            Mount("/mcp", app=authenticated_mcp),
-            Mount('/.well-known', routes=dicovery_routes),
-        ],
-        lifespan=lifespan,
-    )
-
-    logger.info(f"Starting HTTP server on {host}:{port}")
-    config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
-    uv_server = uvicorn.Server(config)
-    await uv_server.serve()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Email MCP Server')
-    parser.add_argument('--host',
-                        default='localhost',
-                        help='Host for HTTP transport (default: localhost)')
-    parser.add_argument('--port',
-                        type=int,
-                        default=8000,
-                        help='Port for HTTP transport (default: 8000)')
-
-    args = parser.parse_args()
-    asyncio.run(main(
-        host=args.host,
-        port=args.port,
-    ))
+    finally:
+        current_user.reset(token)

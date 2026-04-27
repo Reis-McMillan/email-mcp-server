@@ -1,6 +1,6 @@
 from datetime import datetime
 from email_mcp.db.base import Base
-from voluptuous import Email, Schema, Required
+from voluptuous import Any, Email, Schema, Required
 
 
 class AuthCache(Base):
@@ -12,11 +12,19 @@ class AuthCache(Base):
         self.schema = Schema({
             Required('user_id'): int,
             Required('email'): Email(),
-            Required('roles'): list[str],
+            Required('roles'): [str],
             Required('access_token'): str,
             Required('refresh_token'): str,
-            Required('external_tokens'): list[dict] | None,
-            Required('expires_at'): datetime
+            Required('expires_at'): datetime,
+            Required('external_tokens'): Any([{
+                Required('token_id'): int,
+                Required('provider_id'): str,
+                Required('subject'): str,
+                Required('access_token'): str,
+                Required('token_type'): str,
+                Required('expires_at'): Any(datetime, None),
+                Required('email'): Any(Email(), None)
+            }], None)
         })
 
     async def ensure_indexes(self):
