@@ -29,6 +29,9 @@ async def lifespan(app):
     app.state.db.auth_cache = AuthCache()
     app.state.db.authorization = Authorization()
 
+    await app.state.db.auth_cache.ensure_indexes()
+    await app.state.db.authorization.ensure_indexes()
+
     app.state.verys_client = VerysClient(app.state.db.auth_cache)
 
     Service.set_auth_cache(app.state.db.auth_cache)

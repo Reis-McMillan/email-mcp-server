@@ -106,6 +106,8 @@ async def callback(request: Request):
     }
     auth = await verys_client.get_external_tokens(auth)
 
+    await request.app.state.db.authorization.delete(state)
+
     if authorization['return_url']:
         return RedirectResponse(
             authorization['return_url'],
