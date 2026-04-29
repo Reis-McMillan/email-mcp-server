@@ -72,33 +72,33 @@ PROMPTS = {
 }
 
 
-ACCOUNT_PROPERTY = {
-    "account": {
-        "type": "string",
+TOKEN_ID_PROPERTY = {
+    "token_id": {
+        "type": "integer",
         "description": (
-            "Subject identifier of the connected account to scope this call to. "
-            "Use the `account` value returned by a prior tool result."
+            "Federation `token_id` of the connected account to scope this call to. "
+            "Use the `token_id` value returned by a prior tool result or supplied in the user prompt."
         ),
     },
 }
 
 
-def _resolve_services(account: str | None, *, required: bool) -> list[tuple[Service, dict]]:
+def _resolve_services(token_id: int | None, *, required: bool) -> list[tuple[Service, dict]]:
     """Resolve (service, external_token) pairs for the current authenticated user.
 
-    - account given: exactly one matching (service, token) or ValueError.
-    - account None and required: ValueError.
-    - account None and not required: fan out across all connected tokens.
+    - token_id given: exactly one matching (service, token) or ValueError.
+    - token_id None and required: ValueError.
+    - token_id None and not required: fan out across all connected tokens.
     """
     user = current_user.get()
     tokens = user.external_tokens or []
 
-    if account is not None:
-        tokens = [t for t in tokens if t.get("subject") == account]
+    if token_id is not None:
+        tokens = [t for t in tokens if t.get("token_id") == token_id]
         if not tokens:
-            raise ValueError(f"No connected account for subject {account!r}")
+            raise ValueError(f"No connected account for token_id {token_id!r}")
     elif required:
-        raise ValueError("Missing required 'account' parameter")
+        raise ValueError("Missing required 'token_id' parameter")
 
     resolved: list[tuple[Service, dict]] = []
     for tok in tokens:
@@ -191,7 +191,7 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                         "recipient_id": {
                             "type": "string",
                             "description": "Recipient email address",
@@ -205,7 +205,7 @@ def create_server() -> Server:
                             "description": "Email content text",
                         },
                     },
-                    "required": ["account", "recipient_id", "subject", "message"],
+                    "required": ["token_id", "recipient_id", "subject", "message"],
                 },
             ),
             types.Tool(
@@ -214,25 +214,25 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["account", "email_id"],
+                    "required": ["token_id", "email_id"],
                 },
             ),
             types.Tool(
                 name="get-unread-emails",
                 description=(
-                    "Retrieve unread emails. If `account` is omitted, fans out across "
+                    "Retrieve unread emails. If `token_id` is omitted, fans out across "
                     "all of the user's connected email accounts."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                     },
                     "required": [],
                 },
@@ -243,13 +243,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["account", "email_id"],
+                    "required": ["token_id", "email_id"],
                 },
             ),
             types.Tool(
@@ -258,13 +258,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["account", "email_id"],
+                    "required": ["token_id", "email_id"],
                 },
             ),
             types.Tool(
@@ -273,13 +273,13 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        **ACCOUNT_PROPERTY,
+                        **TOKEN_ID_PROPERTY,
                         "email_id": {
                             "type": "string",
                             "description": "Email ID",
                         },
                     },
-                    "required": ["account", "email_id"],
+                    "required": ["token_id", "email_id"],
                 },
             ),
         ]
@@ -289,75 +289,80 @@ def create_server() -> Server:
         name: str, arguments: dict | None
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
         arguments = arguments or {}
-        account = arguments.get("account")
+        token_id = arguments.get("token_id")
 
-        if name == "send-email":
-            recipient = arguments.get("recipient_id")
-            if not recipient:
-                raise ValueError("Missing recipient parameter")
-            subject = arguments.get("subject")
-            if not subject:
-                raise ValueError("Missing subject parameter")
-            message = arguments.get("message")
-            if not message:
-                raise ValueError("Missing message parameter")
+        try:
+            if name == "send-email":
+                recipient = arguments.get("recipient_id")
+                if not recipient:
+                    raise ValueError("Missing recipient parameter")
+                subject = arguments.get("subject")
+                if not subject:
+                    raise ValueError("Missing subject parameter")
+                message = arguments.get("message")
+                if not message:
+                    raise ValueError("Missing message parameter")
 
-            email_lines = message.split('\n')
-            if email_lines[0].startswith('Subject:'):
-                subject = email_lines[0][8:].strip()
-                message_content = '\n'.join(email_lines[1:]).strip()
+                email_lines = message.split('\n')
+                if email_lines[0].startswith('Subject:'):
+                    subject = email_lines[0][8:].strip()
+                    message_content = '\n'.join(email_lines[1:]).strip()
+                else:
+                    message_content = message
+
+                (svc, _), = _resolve_services(token_id, required=True)
+                send_response = await svc.send_email(recipient, subject, message_content)
+
+                if send_response["status"] == "success":
+                    response_text = f"Email sent successfully. Message ID: {send_response['message_id']}"
+                else:
+                    response_text = f"Failed to send email: {send_response['error_message']}"
+                return [types.TextContent(type="text", text=response_text)]
+
+            elif name == "get-unread-emails":
+                services = _resolve_services(token_id, required=False)
+                aggregated: list[dict] = []
+                for svc, tok in services:
+                    try:
+                        msgs = await svc.get_unread_emails()
+                    except Exception as e:
+                        logger.warning("get_unread_emails failed for token_id=%s: %s", tok.get("token_id"), e)
+                        continue
+                    if not isinstance(msgs, list):
+                        logger.warning("get_unread_emails returned non-list for token_id=%s: %s", tok.get("token_id"), msgs)
+                        continue
+                    for m in msgs:
+                        aggregated.append({
+                            **m,
+                            "token_id": tok.get("token_id"),
+                            "account": tok.get("subject"),
+                            "provider_id": tok.get("provider_id"),
+                        })
+                return [types.TextContent(type="text", text=str(aggregated))]
+
+            elif name in ("read-email", "trash-email", "mark-email-as-read", "open-email"):
+                email_id = arguments.get("email_id")
+                if not email_id:
+                    raise ValueError("Missing email ID parameter")
+
+                (svc, _), = _resolve_services(token_id, required=True)
+
+                if name == "read-email":
+                    result = await svc.read_email(email_id)
+                elif name == "trash-email":
+                    result = await svc.trash_email(email_id)
+                elif name == "mark-email-as-read":
+                    result = await svc.mark_email_as_read(email_id)
+                else:  # open-email
+                    result = await svc.open_email(email_id)
+                return [types.TextContent(type="text", text=str(result))]
+
             else:
-                message_content = message
-
-            (svc, _), = _resolve_services(account, required=True)
-            send_response = await svc.send_email(recipient, subject, message_content)
-
-            if send_response["status"] == "success":
-                response_text = f"Email sent successfully. Message ID: {send_response['message_id']}"
-            else:
-                response_text = f"Failed to send email: {send_response['error_message']}"
-            return [types.TextContent(type="text", text=response_text)]
-
-        elif name == "get-unread-emails":
-            services = _resolve_services(account, required=False)
-            aggregated: list[dict] = []
-            for svc, tok in services:
-                try:
-                    msgs = await svc.get_unread_emails()
-                except Exception as e:
-                    logger.warning("get_unread_emails failed for %s: %s", tok.get("subject"), e)
-                    continue
-                if not isinstance(msgs, list):
-                    logger.warning("get_unread_emails returned non-list for %s: %s", tok.get("subject"), msgs)
-                    continue
-                for m in msgs:
-                    aggregated.append({
-                        **m,
-                        "account": tok.get("subject"),
-                        "provider_id": tok.get("provider_id"),
-                    })
-            return [types.TextContent(type="text", text=str(aggregated))]
-
-        elif name in ("read-email", "trash-email", "mark-email-as-read", "open-email"):
-            email_id = arguments.get("email_id")
-            if not email_id:
-                raise ValueError("Missing email ID parameter")
-
-            (svc, _), = _resolve_services(account, required=True)
-
-            if name == "read-email":
-                result = await svc.read_email(email_id)
-            elif name == "trash-email":
-                result = await svc.trash_email(email_id)
-            elif name == "mark-email-as-read":
-                result = await svc.mark_email_as_read(email_id)
-            else:  # open-email
-                result = await svc.open_email(email_id)
-            return [types.TextContent(type="text", text=str(result))]
-
-        else:
-            logger.error(f"Unknown tool: {name}")
-            raise ValueError(f"Unknown tool: {name}")
+                logger.error(f"Unknown tool: {name}")
+                return [types.TextContent(type="text", text=f"Tool {name} failed: unknown tool")]
+        except Exception as e:
+            logger.exception("Tool %s failed", name)
+            return [types.TextContent(type="text", text=f"Tool {name} failed: {e}")]
 
     return server
 
