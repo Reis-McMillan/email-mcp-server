@@ -7,7 +7,9 @@ from starlette.datastructures import State
 from starlette.routing import Mount, Route
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.middleware.cors import CORSMiddleware
 
+from email_mcp.config import config
 from email_mcp.db.auth_cache import AuthCache
 from email_mcp.db.authorization import Authorization
 from email_mcp.middleware.authentication import BearerToken, on_authenticated_error
@@ -15,6 +17,7 @@ from email_mcp.modules.services.service import Service
 from email_mcp.modules.tokens import VerysClient
 from email_mcp.routes.auth import initialize, callback
 from email_mcp.routes.discovery import get_prm
+from email_mcp.routes.heartbeat import heartbeat
 from email_mcp.routes.mcp import create_server, handle_streamable_http
 
 
@@ -45,6 +48,7 @@ async def lifespan(app):
 routes = [
     Route('/auth/initialize', initialize),
     Route('/auth/callback', callback),
+    Route('/heartbeat', heartbeat),
     Route('/.well-known/oauth-protected-resource', get_prm),
     Mount('/mcp', app=handle_streamable_http),
 ]
@@ -53,6 +57,14 @@ app = Starlette(
     lifespan=lifespan,
     routes=routes,
     middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=config.ALLOWED_ORIGINS,
+            allow_credentials=True,
+            allow_methods=['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS'],
+            allow_headers=['Authorization', 'Content-Type', 'Mcp-Session-Id', 'Last-Event-ID'],
+            expose_headers=['Mcp-Session-Id']
+        ),
         Middleware(
             AuthenticationMiddleware,
             backend=BearerToken(),
