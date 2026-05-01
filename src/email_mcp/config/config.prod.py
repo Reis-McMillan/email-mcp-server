@@ -9,6 +9,6 @@ INIT_URI = os.environ.get('INIT_URI')
 MCP_URI = os.environ.get('MCP_URI')
 SCOPES = os.environ.get('SCOPES')
 HOST = '0.0.0.0'
-MONGO_URI = 'mongodb://localhost:27017'
+MONGO_URI = os.environ.get('MONGO_URI')
 DB_NAME = 'email-mcp'
 ALLOWED_ORIGINS=['https://moneypenny.mcmlln.dev']
