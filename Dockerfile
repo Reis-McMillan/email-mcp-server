@@ -6,7 +6,7 @@ WORKDIR /app
 
 ARG ENV=prod
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
 COPY src/ src/
