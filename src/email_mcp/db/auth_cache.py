@@ -16,6 +16,7 @@ class AuthCache(Base):
             Required('access_token'): str,
             Required('refresh_token'): str,
             Required('expires_at'): datetime,
+            Required('moneypenny_token'): Any(str, None),
             Required('external_tokens'): Any([{
                 Required('token_id'): int,
                 Required('provider_id'): str,

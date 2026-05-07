@@ -102,8 +102,10 @@ async def callback(request: Request):
             datetime.fromtimestamp(
                 decoded['auth_time'], tz=timezone.utc
             ) + timedelta(days=60)),
+        'moneypenny_token': None,
         'external_tokens': None
     }
+    auth = await verys_client.moneypenny_token_exchange(auth)
     auth = await verys_client.get_external_tokens(auth)
 
     await request.app.state.db.authorization.delete(state)

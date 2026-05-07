@@ -5,7 +5,7 @@ import email_mcp.config.config as config
 class Base:
     mongo_uri = config.MONGO_URI
     db_name = config.DB_NAME
-    client = AsyncMongoClient(mongo_uri, authSource='admin')
+    client = AsyncMongoClient(mongo_uri, tz_aware=True)
 
     async def upsert(self, obj: dict):
         obj = self.schema(obj)

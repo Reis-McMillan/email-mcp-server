@@ -5,33 +5,18 @@ from starlette.types import Scope, Receive, Send
 import logging
 
 
+import email_mcp.config.config as config
 from email_mcp.modules.services.context import current_user
 from email_mcp.modules.services.service import Service
+from email_mcp.modules.tokens import ReauthRequired
 import email_mcp.modules.services.gmail_service  # noqa: F401 – registers provider
 import email_mcp.modules.services.microsoft_service  # noqa: F401 – registers provider
 
 logger = logging.getLogger(__name__)
 
-EMAIL_ADMIN_PROMPTS = """You are an email administrator.
-You can draft, edit, read, trash, open, and send emails.
-You've been given access to a specific email account.
-You have the following tools available:
-- Send an email (send-email)
-- Retrieve unread emails (get-unread-emails)
-- Read email content (read-email)
-- Trash email (tras-email)
-- Open email in browser (open-email)
-Never send an email draft or trash an email unless the user confirms first.
-Always ask for approval if not already given.
-"""
 
 # Define available prompts
 PROMPTS = {
-    "manage-email": types.Prompt(
-        name="manage-email",
-        description="Act like an email administator",
-        arguments=None,
-    ),
     "draft-email": types.Prompt(
         name="draft-email",
         description="Draft an email with cotent and recipient",
@@ -124,19 +109,6 @@ def create_server() -> Server:
         if name not in PROMPTS:
             raise ValueError(f"Prompt not found: {name}")
 
-        if name == "manage-email":
-            return types.GetPromptResult(
-                messages=[
-                    types.PromptMessage(
-                        role="user",
-                        content=types.TextContent(
-                            type="text",
-                            text=EMAIL_ADMIN_PROMPTS,
-                        )
-                    )
-                ]
-            )
-
         if name == "draft-email":
             content = arguments.get("content", "")
             recipient = arguments.get("recipient", "")
@@ -148,9 +120,8 @@ def create_server() -> Server:
                         role="user",
                         content=types.TextContent(
                             type="text",
-                            text=f"""Please draft an email about {content} for {recipient} ({recipient_email}).
-                            Include a subject line starting with 'Subject:' on the first line.
-                            Do not send the email yet, just draft it and ask the user for their thoughts."""
+                            text=f"""Please draft and then send an email about {content} for {recipient} ({recipient_email}).
+                            Include a subject line starting with 'Subject:' on the first line."""
                         )
                     )
                 ]
@@ -207,6 +178,9 @@ def create_server() -> Server:
                     },
                     "required": ["token_id", "recipient_id", "subject", "message"],
                 },
+                annotations={
+                    "consent-required": True
+                }
             ),
             types.Tool(
                 name="trash-email",
@@ -222,6 +196,9 @@ def create_server() -> Server:
                     },
                     "required": ["token_id", "email_id"],
                 },
+                annotations={
+                    "consent-required": True
+                }
             ),
             types.Tool(
                 name="get-unread-emails",
@@ -236,6 +213,9 @@ def create_server() -> Server:
                     },
                     "required": [],
                 },
+                annotations={
+                    "consent-required": False
+                }
             ),
             types.Tool(
                 name="read-email",
@@ -251,6 +231,9 @@ def create_server() -> Server:
                     },
                     "required": ["token_id", "email_id"],
                 },
+                annotations={
+                    "consent-required": False
+                }
             ),
             types.Tool(
                 name="mark-email-as-read",
@@ -266,21 +249,9 @@ def create_server() -> Server:
                     },
                     "required": ["token_id", "email_id"],
                 },
-            ),
-            types.Tool(
-                name="open-email",
-                description="Open email in browser from the specified account.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        **TOKEN_ID_PROPERTY,
-                        "email_id": {
-                            "type": "string",
-                            "description": "Email ID",
-                        },
-                    },
-                    "required": ["token_id", "email_id"],
-                },
+                annotations={
+                    "consent-required": True
+                }
             ),
         ]
 
@@ -322,9 +293,13 @@ def create_server() -> Server:
             elif name == "get-unread-emails":
                 services = _resolve_services(token_id, required=False)
                 aggregated: list[dict] = []
+                reauth_providers: set[str] = set()
                 for svc, tok in services:
                     try:
                         msgs = await svc.get_unread_emails()
+                    except ReauthRequired as e:
+                        reauth_providers.add(e.provider_id)
+                        continue
                     except Exception as e:
                         logger.warning("get_unread_emails failed for token_id=%s: %s", tok.get("token_id"), e)
                         continue
@@ -338,9 +313,16 @@ def create_server() -> Server:
                             "account": tok.get("subject"),
                             "provider_id": tok.get("provider_id"),
                         })
-                return [types.TextContent(type="text", text=str(aggregated))]
 
-            elif name in ("read-email", "trash-email", "mark-email-as-read", "open-email"):
+                text = str(aggregated)
+                if reauth_providers:
+                    text += (
+                        f"\n\nReauthorization required for: {', '.join(sorted(reauth_providers))}. "
+                        f"Visit {config.MONEYPENNY_URL} to complete reauthorization."
+                    )
+                return [types.TextContent(type="text", text=text)]
+
+            elif name in ("read-email", "trash-email", "mark-email-as-read"):
                 email_id = arguments.get("email_id")
                 if not email_id:
                     raise ValueError("Missing email ID parameter")
@@ -353,13 +335,19 @@ def create_server() -> Server:
                     result = await svc.trash_email(email_id)
                 elif name == "mark-email-as-read":
                     result = await svc.mark_email_as_read(email_id)
-                else:  # open-email
-                    result = await svc.open_email(email_id)
                 return [types.TextContent(type="text", text=str(result))]
 
             else:
                 logger.error(f"Unknown tool: {name}")
                 return [types.TextContent(type="text", text=f"Tool {name} failed: unknown tool")]
+        except ReauthRequired as e:
+            return [types.TextContent(
+                type="text",
+                text=(
+                    f"Reauthorization required for provider {e.provider_id!r}. "
+                    f"Visit {e.moneypenny_url} to complete reauthorization."
+                ),
+            )]
         except Exception as e:
             logger.exception("Tool %s failed", name)
             return [types.TextContent(type="text", text=f"Tool {name} failed: {e}")]

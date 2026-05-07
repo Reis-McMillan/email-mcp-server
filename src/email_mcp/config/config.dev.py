@@ -11,4 +11,6 @@ SCOPES = 'openid google'
 HOST = '0.0.0.0'
 MONGO_URI = 'mongodb://localhost:27017?directConnection=true'
 DB_NAME = 'email-mcp'
+MONEYPENNY_URL = 'http://localhost:8080'
+MONEYPENNY_CLIENT_ID = os.environ.get('MONEYPENNY_CLIENT_ID')
 ALLOWED_ORIGINS=['http://localhost:5173']

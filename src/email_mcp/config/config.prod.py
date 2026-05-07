@@ -11,4 +11,6 @@ SCOPES = os.environ.get('SCOPES')
 HOST = '0.0.0.0'
 MONGO_URI = os.environ.get('MONGO_URI')
 DB_NAME = 'email-mcp'
+MONEYPENNY_URL = os.environ.get('MONEYPENNY_URL')
+MONEYPENNY_CLIENT_ID = os.environ.get('MONEYPENNY_CLIENT_ID')
 ALLOWED_ORIGINS=['https://moneypenny.mcmlln.dev']

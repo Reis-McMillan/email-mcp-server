@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 import email_mcp.config.config as config
 from email_mcp.db.auth_cache import AuthCache
+from email_mcp.modules.tokens import VerysClient
 from email_mcp.utils.jwks import get_public_key
 
 
@@ -57,6 +58,9 @@ class BearerToken(AuthenticationBackend):
         auth = await auth_cache.get(user_id)
         if not auth:
             raise AuthCacheMissing('User session not found.')
+        
+        verys_client: VerysClient = conn.app.state.verys_client
+        auth = await verys_client.check_moneypenny_token(auth)
         
         return AuthCredentials(["authenticated"]), User(auth)
 
