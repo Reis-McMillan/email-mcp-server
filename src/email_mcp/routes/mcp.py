@@ -68,10 +68,12 @@ TOKEN_ID_PROPERTY = {
 }
 
 
-def _resolve_services(token_id: int | None, *, required: bool) -> list[tuple[Service, dict]]:
+async def _resolve_services(token_id: int | None, *, required: bool) -> list[tuple[Service, dict]]:
     """Resolve (service, external_token) pairs for the current authenticated user.
 
     - token_id given: exactly one matching (service, token) or ValueError.
+        If the token isn't in the user's cached external_tokens, fall through
+        to Verys to check whether it exists there before failing.
     - token_id None and required: ValueError.
     - token_id None and not required: fan out across all connected tokens.
     """
@@ -79,9 +81,15 @@ def _resolve_services(token_id: int | None, *, required: bool) -> list[tuple[Ser
     tokens = user.external_tokens or []
 
     if token_id is not None:
-        tokens = [t for t in tokens if t.get("token_id") == token_id]
-        if not tokens:
-            raise ValueError(f"No connected account for token_id {token_id!r}")
+        match = [t for t in tokens if t.get("token_id") == token_id]
+        if not match:
+            auth = await Service.verys_client.get_external_tokens(user.auth, token_id=token_id)
+            user.auth = auth
+            user.external_tokens = auth.get('external_tokens') or []
+            match = [t for t in user.external_tokens if t.get("token_id") == token_id]
+            if not match:
+                raise ValueError(f"No connected account for token_id {token_id!r}")
+        tokens = match
     elif required:
         raise ValueError("Missing required 'token_id' parameter")
 
@@ -281,7 +289,7 @@ def create_server() -> Server:
                 else:
                     message_content = message
 
-                (svc, _), = _resolve_services(token_id, required=True)
+                (svc, _), = await _resolve_services(token_id, required=True)
                 send_response = await svc.send_email(recipient, subject, message_content)
 
                 if send_response["status"] == "success":
@@ -291,7 +299,7 @@ def create_server() -> Server:
                 return [types.TextContent(type="text", text=response_text)]
 
             elif name == "get-unread-emails":
-                services = _resolve_services(token_id, required=False)
+                services = await _resolve_services(token_id, required=False)
                 aggregated: list[dict] = []
                 reauth_providers: set[str] = set()
                 for svc, tok in services:
@@ -327,7 +335,7 @@ def create_server() -> Server:
                 if not email_id:
                     raise ValueError("Missing email ID parameter")
 
-                (svc, _), = _resolve_services(token_id, required=True)
+                (svc, _), = await _resolve_services(token_id, required=True)
 
                 if name == "read-email":
                     result = await svc.read_email(email_id)
